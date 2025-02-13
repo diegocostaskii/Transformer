@@ -5,13 +5,14 @@ import os
 import torch
 import json
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-
+from model2 import StackedGPT2Model
 # -----------------------------------------------------------------------------
 init_from = 'resume'  # 'resume' 或者指定预训练的 GPT-2 模型 (例如 'gpt2-xl')
 checkpoint_name = 'ckpt_batch_32.pt'
 out_dir = 'out'  # 如果 init_from 是 'resume'，这里会用到
 start = "\n"  # 或 "<|endoftext|>" 或其他自定义起始文本
 num_samples = 10  # 生成的样本数
+n_embd = 768
 max_new_tokens = 256  # 每个样本生成的最大token数量
 temperature = 0.8  # 控制生成随机性的温度
 top_k = 200  # top_k 策略
@@ -38,7 +39,7 @@ if init_from == 'resume':
     ckpt_path = os.path.join(out_dir, checkpoint_name)  # 假设保存的检查点路径是 out_dir/ckpt.pt
     checkpoint = torch.load(ckpt_path, map_location=device)
     model_name = checkpoint['model_name']
-    model = GPT2LMHeadModel.from_pretrained(model_name)
+    model = StackedGPT2Model(config={'device':device,'n_embd':n_embd,'batch_size':batch_size,'init_from':init_from})
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     model.load_state_dict(checkpoint['model'])  # 加载模型的状态字典
 elif init_from.startswith('gpt2'):

@@ -29,7 +29,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
-
+from model2 import StackedGPT2Model
 # ----------------------------------------------------------------------------- 
 # default config values designed to train a gpt2 (124M) on OpenWebText
 # I/O
@@ -51,11 +51,13 @@ batch_size = 8 # if gradient_accumulation_steps > 1, this is the micro-batch siz
 n_layer = 12
 n_head = 12
 n_embd = 768
+additional_tensor_size=100
+stackLayers = 5
 dropout = 0.2 # for pretraining 0 is good, for finetuning try 0.1+
 bias = False # do we use bias inside LayerNorm and Linear layers?
 # adamw optimizer
 learning_rate = 6e-4 # max learning rate
-max_iters = 100 # total number of training iterations
+max_iters = 10 # total number of training iterations
 weight_decay = 1e-1
 beta1 = 0.9
 beta2 = 0.95
@@ -68,7 +70,7 @@ min_lr = 6e-5 # minimum learning rate, should be ~= learning_rate/10 per Chinchi
 # DDP settings
 backend = 'nccl' # 'nccl', 'gloo', etc.
 # system
-device = 'cuda:3' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
+device = 'cuda' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1' etc., or try 'mps' on macbooks
 dtype = 'bfloat16' if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else 'float16' # 'float32', 'bfloat16', or 'float16', the latter will auto implement a GradScaler
 compile = False # use PyTorch 2.0 to compile the model to be faster
 # ----------------------------------------------------------------------------- 
@@ -170,7 +172,7 @@ class CollateFn:
         for item in batch:
             pad_len = max_length - len(item["input_ids"]) 
             input_ids.append(torch.cat([item["input_ids"], torch.full((pad_len,), self.pad_token_id, dtype=torch.long)]))
-            attention_masks.append(torch.cat([torch.ones(len(item["input_ids"]), dtype=torch.float), torch.zeros(pad_len, dtype=torch.float)]))
+            attention_masks.append(torch.cat([torch.ones(len(item["input_ids"])+additional_tensor_size, dtype=torch.float), torch.zeros(pad_len, dtype=torch.float)]))
             loss_masks.append(torch.cat([item["loss_mask"], torch.zeros(pad_len, dtype=torch.float)]))
 
         return {
@@ -184,34 +186,38 @@ def compute_loss(model, batch):
     attention_mask = batch["attention_mask"].to(device)
     loss_mask = batch["loss_mask"].to(device)
 
-    logits = model(input_ids, attention_mask=attention_mask)[0]
-    shift_logits = logits[:, :-1, :].contiguous()
-    shift_labels = input_ids[:, 1:]
-    shift_mask = loss_mask[:, 1:].contiguous()
+    logits = model(input_ids, attention_mask=attention_mask)
+    total_losse = 0
+    for i, logit in enumerate(logits):
+        shift_logits = logit[:, :-1, :].contiguous()
+        shift_labels = input_ids[:, 1:]
+        shift_mask = loss_mask[:, 1:].contiguous()
+        loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
+        loss = loss_fn(shift_logits.reshape(-1, shift_logits.size(-1)), shift_labels.reshape(-1))
+        loss = loss.view(shift_labels.size()) * shift_mask
+        loss = loss.sum() / shift_mask.sum()
+        total_losse += loss
 
-    loss_fn = torch.nn.CrossEntropyLoss(reduction='none')
-    loss = loss_fn(shift_logits.reshape(-1, shift_logits.size(-1)), shift_labels.reshape(-1))
-    loss = loss.view(shift_labels.size()) * shift_mask
-    return loss.sum() / shift_mask.sum()
+    return total_losse // model.stackLayers
 
 # model init
 if init_from == 'scratch':
     print("Initializing a new model from scratch")
     model_name = 'gpt2'
-    model = GPT2LMHeadModel(config={'vocab_size': 50304, 'n_embd': n_embd, 'num_layers': n_layer, 'num_heads': n_head, 'dropout': dropout})
+    model = StackedGPT2Model(config={'vocab_size': 50304, 'n_embd': n_embd, 'num_layers': n_layer, 'num_heads': n_head, 'dropout': dropout})
     tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
 elif init_from == 'resume':
     print(f"Resuming training from {out_dir}")
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     model_name = checkpoint['model_name']
-    model = GPT2LMHeadModel.from_pretrained(model_name)
+    model = StackedGPT2Model(config={'device':device,'n_embd':n_embd,'batch_size':batch_size,'init_from':init_from})
     tokenizer = GPT2Tokenizer.from_pretrained(model_name)
     model.load_state_dict(checkpoint['model'])
 elif init_from.startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: {init_from}")
     model_name = init_from
-    model = GPT2LMHeadModel.from_pretrained(init_from)
+    model = StackedGPT2Model(config={'device':device,'n_embd':n_embd,'batch_size':batch_size,'init_from':init_from})
     tokenizer = GPT2Tokenizer.from_pretrained(init_from)
     
 model.to(device)
@@ -253,8 +259,8 @@ if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
-train_dataset = ProblemAnswerDataset('/data/jyliu/transformer_project/nanoGPT-master/data/gsm8k/train.jsonl', tokenizer)
-val_dataset = ProblemAnswerDataset('/data/jyliu/transformer_project/nanoGPT-master/data/gsm8k/test.jsonl', tokenizer)
+train_dataset = ProblemAnswerDataset('./data/train.jsonl', tokenizer)
+val_dataset = ProblemAnswerDataset('./data/test.jsonl', tokenizer)
 
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=CollateFn(tokenizer.eos_token_id))
 val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=CollateFn(tokenizer.eos_token_id))
