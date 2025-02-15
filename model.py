@@ -4,7 +4,7 @@ from transformers import GPT2LMHeadModel
 
 # Define our model
 class ModelM(nn.Module):
-    def __init__(self, tokenizer, init_from=('gpt2', 'gpt2', 'gpt2'), neuron_dim=100, num_iterations=5):
+    def __init__(self, tokenizer, init_from=('gpt2', 'gpt2', 'gpt2'),batch_size=8, fixed_neuron_nums=50, neuron_dim=100, num_iterations=5):
         super().__init__()
         self.tokenizer = tokenizer
 
@@ -15,8 +15,9 @@ class ModelM(nn.Module):
         
         # Extra Learnable Matrix (100 x embedding_dim)
         self.neuron_dim = neuron_dim
-        self.neuron_matrix = nn.Parameter(torch.randn(neuron_dim, self.think_model.config.n_embd))
-        
+        self.fixed_neuron_nums = fixed_neuron_nums
+        self.neuron_matrix = nn.Parameter(torch.randn(batch_size, neuron_dim, self.think_model.config.n_embd))
+        self.fixed_neuron= self.neuron_matrix[:,:fixed_neuron_nums,:]
         self.num_iterations = num_iterations
 
     def forward(self, input_ids, attention_mask):
@@ -33,8 +34,9 @@ class ModelM(nn.Module):
             encoder_outputs = self.encoder.transformer(input_ids, attention_mask=attention_mask).last_hidden_state
         
         # Expand Neuron Matrix to Match Batch Size
-        neuron_matrix = self.neuron_matrix.to(device).unsqueeze(0).expand(batch_size, -1, -1)  # (batch, 100, dim)
-
+        # neuron_matrix = self.neuron_matrix.to(device).unsqueeze(0).expand(batch_size, -1, -1)  # (batch, 100, dim)
+        neuron_matrix = self.neuron_matrix.to(device)
+        fixed_neuron = self.fixed_neuron.to(device)
         # Update Attention Mask
         extra_attention_mask = torch.ones((batch_size, self.neuron_dim), dtype=torch.long, device=device)  # (batch, 100)
         updated_attention_mask = torch.cat([attention_mask, extra_attention_mask], dim=1)  # (batch, seq_len + 100)
@@ -43,13 +45,15 @@ class ModelM(nn.Module):
         
         for i in range(self.num_iterations):
             # Concatenate Encoder Representation with Extra Matrix
-            thinking_input = torch.cat([encoder_outputs, neuron_matrix], dim=1)  # (batch, seq_len + 100, dim)
+            thinking_input = torch.cat([encoder_outputs,fixed_neuron, neuron_matrix[:, self.fixed_neuron_nums:,:]], dim=1)  # (batch, seq_len + 100, dim)
             # Pass to Model
             output = self.think_model.transformer(inputs_embeds=thinking_input, attention_mask=updated_attention_mask).last_hidden_state  # (batch, seq_len + 100, dim)
             
             # Extract the Extra Matrix Part for Next Iteration
             neuron_matrix = output[:, -self.neuron_dim:, :]  # (batch, 100, dim)
+            neuron_matrix = torch.cat([fixed_neuron, neuron_matrix[:, self.fixed_neuron_nums:,:]], dim=1)
             neuron_matrixes.append(neuron_matrix)
+        
         return neuron_matrixes
 
     def decode(self, neuron_matrix, decode_text_ids=None):

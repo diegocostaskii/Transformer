@@ -135,11 +135,11 @@ if init_from[0] == 'resume':
     ckpt_path = os.path.join(out_dir, 'ckpt.pt')
     checkpoint = torch.load(ckpt_path, map_location=device)
     encoder_name, think_name, decoder_name = checkpoint['encoder_name'], checkpoint['think_name'], checkpoint['decoder_name']
-    model = ModelM(tokenizer, init_from=(encoder_name, think_name, decoder_name), neuron_dim=100, num_iterations=num_iterations)
+    model = ModelM(tokenizer, init_from=(encoder_name, think_name, decoder_name), neuron_dim=100, num_iterations=num_iterations,batch_size = batch_size)
     model.load_state_dict(checkpoint['model'])
 elif init_from[0].startswith('gpt2'):
     print(f"Initializing from OpenAI GPT-2 weights: encoder-{init_from[0]}, thinker-{init_from[1]}, decoder-{init_from[2]}")
-    model = ModelM(tokenizer, init_from=init_from, neuron_dim=100, num_iterations=num_iterations)
+    model = ModelM(tokenizer, init_from=init_from, neuron_dim=100, num_iterations=num_iterations,batch_size = batch_size)
 
 model.to(device)
 
